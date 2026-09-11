@@ -21,7 +21,7 @@ import {
   saveResponses,
   submitAssessment,
 } from './store';
-import { backendName } from '@/lib/db';
+import { backendName, execRaw } from '@/lib/db';
 import { clientKey, rateLimit } from './rate-limit';
 import { computeDomainScores, overallScore, ratingFor } from '@/lib/riskQuestions';
 
@@ -29,6 +29,10 @@ export const app = new Hono();
 
 app.onError((err, c) => {
   console.error('[api] error', err);
+  const message = err instanceof Error ? err.message : '';
+  if (message.startsWith('Cloudflare D1')) {
+    return c.json({ error: 'Database unavailable', detail: message }, 503);
+  }
   return c.json({ error: 'Internal server error' }, 500);
 });
 
@@ -81,9 +85,16 @@ async function authorizeAssessment(c: any, id: string) {
 
 /* ------------------------------- health -------------------------------- */
 
-app.get('/api/health', (c) =>
-  c.json({ ok: true, backend: backendName(), time: new Date().toISOString() }),
-);
+app.get('/api/health', async (c) => {
+  const base = { backend: backendName(), time: new Date().toISOString() };
+  try {
+    await execRaw('SELECT 1 AS ok');
+    return c.json({ ...base, ok: true, db: 'ok' as const });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : 'Database probe failed';
+    return c.json({ ...base, ok: false, db: 'error' as const, dbError: detail }, 500);
+  }
+});
 
 /* --------------------------- participant flow -------------------------- */
 

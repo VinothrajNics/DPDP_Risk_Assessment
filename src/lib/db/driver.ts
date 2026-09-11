@@ -95,6 +95,49 @@ function rowsToValues(rows: unknown[]): RowValues[] {
   );
 }
 
+/**
+ * Extracts the row array from a Cloudflare D1 REST response.
+ *
+ * Known shapes:
+ *   /raw   : { result: [ { results: { columns: [...], rows: [[...], ...] } } ] }
+ *   /query : { result: [ { results: [ {col: val}, ... ] } ] }
+ *   also tolerates `result` being the rows array directly.
+ */
+function unwrapRows(value: unknown): unknown[] | null {
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === 'object') {
+    const rows = (value as { rows?: unknown }).rows;
+    if (Array.isArray(rows)) return rows;
+  }
+  return null;
+}
+
+function extractRows(result: unknown): unknown[] {
+  if (result == null) return [];
+
+  if (Array.isArray(result)) {
+    if (result.length === 0) return [];
+    const first = result[0] as unknown;
+    if (first && typeof first === 'object' && !Array.isArray(first)) {
+      const inner = unwrapRows((first as { results?: unknown }).results);
+      if (inner) return inner;
+      // The array itself is already the list of row objects.
+      return result;
+    }
+    // The array itself is already the list of raw row arrays.
+    return result;
+  }
+
+  if (typeof result === 'object') {
+    const wrapped = unwrapRows((result as { results?: unknown }).results);
+    if (wrapped) return wrapped;
+    const direct = unwrapRows(result);
+    if (direct) return direct;
+  }
+
+  return [];
+}
+
 async function d1Call(
   endpoint: 'raw' | 'query',
   sql: string,
@@ -117,20 +160,12 @@ async function d1Call(
     return { ok: false, errorDetail: detail, rows: [] };
   }
 
-  const first = Array.isArray(json.result) ? json.result[0] : json.result;
-  let rows: unknown[] = [];
-  if (first && typeof first === 'object' && Array.isArray((first as { results?: unknown }).results)) {
-    rows = (first as { results: unknown[] }).results;
-  } else if (Array.isArray(first)) {
-    rows = first as unknown[];
-  }
-  return { ok: true, rows };
+  return { ok: true, rows: extractRows(json.result) };
 }
 
 async function d1RestQuery(sql: string, params: unknown[]): Promise<RowValues[]> {
-  // The `/raw` endpoint returns rows as arrays of column values, which is exactly
-  // the shape drizzle-orm/sqlite-proxy expects. If it is unavailable we fall back
-  // to `/query` (rows as objects) and convert.
+  // `/raw` returns rows as value arrays (drizzle sqlite-proxy's expected shape).
+  // `/query` is the fallback and returns rows as objects.
   const raw = await d1Call('raw', sql, params);
   if (raw.ok) return rowsToValues(raw.rows);
 
