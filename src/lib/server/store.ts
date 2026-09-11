@@ -181,21 +181,28 @@ export async function saveResponses(
     }
   }
 
-  if (toDelete.length > 0) {
+  // Cloudflare D1 caps bound parameters per query (100), so bulk writes are
+  // chunked: insert chunk = 15 rows x 6 columns = 90 params; delete chunk = 80.
+  const INSERT_CHUNK = 15;
+  const DELETE_CHUNK = 80;
+
+  for (let i = 0; i < toDelete.length; i += DELETE_CHUNK) {
+    const chunk = toDelete.slice(i, i + DELETE_CHUNK);
     await db
       .delete(riskResponses)
       .where(
         and(
           eq(riskResponses.assessmentId, assessmentId),
-          inArray(riskResponses.questionId, toDelete),
+          inArray(riskResponses.questionId, chunk),
         ),
       );
   }
 
-  if (toUpsert.length > 0) {
+  for (let i = 0; i < toUpsert.length; i += INSERT_CHUNK) {
+    const chunk = toUpsert.slice(i, i + INSERT_CHUNK);
     await db
       .insert(riskResponses)
-      .values(toUpsert)
+      .values(chunk)
       .onConflictDoUpdate({
         target: [riskResponses.assessmentId, riskResponses.questionId],
         set: {
