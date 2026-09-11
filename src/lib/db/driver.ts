@@ -83,11 +83,24 @@ interface D1RestResponse {
   result?: unknown;
 }
 
-async function d1RestQuery(sql: string, params: unknown[]): Promise<RowValues[]> {
-  // The `/raw` endpoint returns rows as arrays of column values, which is exactly
-  // the shape drizzle-orm/sqlite-proxy expects. This avoids relying on object key
-  // ordering from the `/query` endpoint.
-  const url = `https://api.cloudflare.com/client/v4/accounts/${D1_ACCOUNT_ID}/d1/database/${D1_DATABASE_ID}/raw`;
+interface D1EndpointResult {
+  ok: boolean;
+  errorDetail?: string;
+  rows: unknown[];
+}
+
+function rowsToValues(rows: unknown[]): RowValues[] {
+  return rows.map((row) =>
+    Array.isArray(row) ? (row as RowValues) : Object.values(row as Record<string, unknown>),
+  );
+}
+
+async function d1Call(
+  endpoint: 'raw' | 'query',
+  sql: string,
+  params: unknown[],
+): Promise<D1EndpointResult> {
+  const url = `https://api.cloudflare.com/client/v4/accounts/${D1_ACCOUNT_ID}/d1/database/${D1_DATABASE_ID}/${endpoint}`;
   const res = await fetch(url, {
     method: 'POST',
     headers: {
@@ -98,10 +111,10 @@ async function d1RestQuery(sql: string, params: unknown[]): Promise<RowValues[]>
     cache: 'no-store',
   });
 
-  const json = (await res.json()) as D1RestResponse;
-  if (!res.ok || !json.success) {
-    const detail = json.errors?.map((e) => e.message).join('; ') || `HTTP ${res.status}`;
-    throw new Error(`Cloudflare D1 request failed: ${detail}`);
+  const json = (await res.json().catch(() => null)) as D1RestResponse | null;
+  if (!res.ok || !json || !json.success) {
+    const detail = json?.errors?.map((e) => e.message).join('; ') || `HTTP ${res.status}`;
+    return { ok: false, errorDetail: detail, rows: [] };
   }
 
   const first = Array.isArray(json.result) ? json.result[0] : json.result;
@@ -111,10 +124,21 @@ async function d1RestQuery(sql: string, params: unknown[]): Promise<RowValues[]>
   } else if (Array.isArray(first)) {
     rows = first as unknown[];
   }
+  return { ok: true, rows };
+}
 
-  return rows.map((row) =>
-    Array.isArray(row) ? (row as RowValues) : Object.values(row as Record<string, unknown>),
-  );
+async function d1RestQuery(sql: string, params: unknown[]): Promise<RowValues[]> {
+  // The `/raw` endpoint returns rows as arrays of column values, which is exactly
+  // the shape drizzle-orm/sqlite-proxy expects. If it is unavailable we fall back
+  // to `/query` (rows as objects) and convert.
+  const raw = await d1Call('raw', sql, params);
+  if (raw.ok) return rowsToValues(raw.rows);
+
+  const fallback = await d1Call('query', sql, params);
+  if (!fallback.ok) {
+    throw new Error(`Cloudflare D1 request failed: ${fallback.errorDetail}`);
+  }
+  return rowsToValues(fallback.rows);
 }
 
 /**
